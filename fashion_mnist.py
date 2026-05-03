@@ -17,9 +17,12 @@ Plus four small extensions that earn marks:
 
 Outputs (everything Word can paste):
     samples_preview.png             - Part 1
-    training_curves.png             - Parts 2/3/4 + CNN
-    confusion_matrices.png          - per-model error breakdown
-    gradient_norms_per_layer.png    - vanishing-gradient diagnostic
+    training_curves_assignment.png  - sigmoid + ReLU + ReLU+Drop only (5 seeds)
+    training_curves_extensions.png  - assignment + GELU + Mish + CNN (5 seeds)
+    confusion_assignment.png        - sigmoid + ReLU only (seed 42)
+    confusion_extensions.png        - GELU + Mish + CNN + ReLU+Drop (seed 42)
+    gradient_norms_assignment.png   - sigmoid vs ReLU, log y, seed 42
+    gradient_norms_extensions.png   - all FC activations, log y, seed 42
     lr_sweep_plot.png               - LR sensitivity (Part 6)
     pareto_acc_vs_time.png          - final scoreboard incl. classical baselines
     results_summary.md              - one consolidated markdown report
@@ -264,22 +267,23 @@ class GradNormCallback(tf.keras.callbacks.Callback):
 def run_fc_experiment(name: str, activation: str, dropout: float,
                       X_tr: NDArray[np.float32], y_tr_oh: NDArray[np.float32],
                       X_te: NDArray[np.float32], y_te_oh: NDArray[np.float32],
+                      *, seed: int = SEED, lr: float = 0.01, verbose: int = 2,
                       ) -> dict[str, Any]:
-    print(f"\n=== {name} ===")
-    np.random.seed(SEED); tf.random.set_seed(SEED)
+    np.random.seed(seed); tf.random.set_seed(seed)
     model = build_fc(activation, dropout)
+    if lr != 0.01:
+        model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=lr),
+                      loss="categorical_crossentropy", metrics=["accuracy"])
     grad_cb = GradNormCallback(X_tr[:BATCH_SIZE], y_tr_oh[:BATCH_SIZE])
     t0 = time.perf_counter()
     history = model.fit(X_tr, y_tr_oh, validation_data=(X_te, y_te_oh),
-                        epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=2,
+                        epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=verbose,
                         callbacks=[grad_cb])
     fit_time = time.perf_counter() - t0
     y_pred = np.argmax(model.predict(X_te, batch_size=BATCH_SIZE, verbose=0), axis=1)
     y_true = np.argmax(y_te_oh, axis=1)
-    print(f"[{name}] train_acc={history.history['accuracy'][-1]:.4f} "
-          f"test_acc={history.history['val_accuracy'][-1]:.4f}")
     return {
-        "name": name, "is_cnn": False,
+        "name": name, "is_cnn": False, "seed": seed, "lr": lr,
         "history": history.history,
         "train_loss": history.history["loss"][-1],
         "train_acc": history.history["accuracy"][-1],
@@ -290,6 +294,23 @@ def run_fc_experiment(name: str, activation: str, dropout: float,
         "kernel_sizes": grad_cb.kernel_sizes,
         "fit_time_s": fit_time,
     }
+
+
+def run_fc_multi_seed(name: str, activation: str, dropout: float,
+                      X_tr: NDArray[np.float32], y_tr_oh: NDArray[np.float32],
+                      X_te: NDArray[np.float32], y_te_oh: NDArray[np.float32],
+                      seeds: list[int], lr: float = 0.01,
+                      ) -> list[dict[str, Any]]:
+    print(f"\n=== {name} (lr={lr}, {len(seeds)} seeds) ===")
+    runs: list[dict[str, Any]] = []
+    for s in seeds:
+        r = run_fc_experiment(name, activation, dropout, X_tr, y_tr_oh, X_te, y_te_oh,
+                              seed=s, lr=lr, verbose=0)
+        tf.keras.backend.clear_session()
+        runs.append(r)
+        print(f"  seed={s:3d}  train_acc={r['train_acc']:.4f}  "
+              f"test_acc={r['test_acc']:.4f}  ({r['fit_time_s']:.1f}s)")
+    return runs
 
 
 def run_cnn_experiment(X_tr: NDArray[np.float32], y_tr_oh: NDArray[np.float32],
@@ -333,32 +354,76 @@ def run_cnn_experiment(X_tr: NDArray[np.float32], y_tr_oh: NDArray[np.float32],
 # -----------------------------------------------------------------------------
 # Plot functions (8 deliverables)
 # -----------------------------------------------------------------------------
-def plot_training_curves(results: list[dict[str, Any]], out_path: Path) -> None:
+def _representative_run(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pick the seed=42 run if present, else the first run."""
+    return next((r for r in runs if r.get("seed") == SEED), runs[0])
+
+
+def plot_training_curves(runs_by_model: dict[str, list[dict[str, Any]]],
+                         models: list[str], out_path: Path,
+                         title: str = "Training and validation curves") -> None:
+    """Two-panel plot (accuracy, loss) with mean line and +/- 1 std band over
+    seeds. Each entry in runs_by_model is a list of run dicts (one per seed)."""
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
-    for r in results:
-        h = r["history"]
-        axes[0].plot(h["loss"], label=f"{r['name']} train", linewidth=1.2)
-        axes[0].plot(h["val_loss"], "--", label=f"{r['name']} test", linewidth=1.2)
-        axes[1].plot(h["accuracy"], label=f"{r['name']} train", linewidth=1.2)
-        axes[1].plot(h["val_accuracy"], "--", label=f"{r['name']} test", linewidth=1.2)
-    axes[0].set_title("Loss"); axes[0].set_xlabel("epoch"); axes[0].grid(True, alpha=0.3)
-    axes[1].set_title("Accuracy"); axes[1].set_xlabel("epoch"); axes[1].grid(True, alpha=0.3)
-    axes[1].legend(fontsize=7, loc="lower right", ncol=2)
-    fig.tight_layout(); fig.savefig(out_path, dpi=110); plt.close(fig)
+    cmap = plt.get_cmap("tab10")
+    for i, name in enumerate(models):
+        if name not in runs_by_model:
+            continue
+        runs = runs_by_model[name]
+        train_acc = np.array([r["history"]["accuracy"] for r in runs])
+        val_acc = np.array([r["history"]["val_accuracy"] for r in runs])
+        train_loss = np.array([r["history"]["loss"] for r in runs])
+        val_loss = np.array([r["history"]["val_loss"] for r in runs])
+        epochs_x = np.arange(1, train_acc.shape[1] + 1)
+        color = cmap(i % 10)
+        for ax, train, val in [(axes[0], train_acc, val_acc),
+                                (axes[1], train_loss, val_loss)]:
+            ax.plot(epochs_x, train.mean(0), color=color, linewidth=1.4,
+                    label=f"{name} train")
+            ax.plot(epochs_x, val.mean(0), color=color, linewidth=1.4,
+                    linestyle="--", label=f"{name} test")
+            if train.shape[0] > 1:
+                ax.fill_between(epochs_x, train.mean(0) - train.std(0),
+                                train.mean(0) + train.std(0),
+                                color=color, alpha=0.18)
+                ax.fill_between(epochs_x, val.mean(0) - val.std(0),
+                                val.mean(0) + val.std(0),
+                                color=color, alpha=0.10)
+    axes[0].set_title("Accuracy"); axes[0].set_xlabel("epoch")
+    axes[0].set_ylabel("accuracy"); axes[0].grid(True, alpha=0.3)
+    axes[1].set_title("Loss"); axes[1].set_xlabel("epoch")
+    axes[1].set_ylabel("loss"); axes[1].grid(True, alpha=0.3)
+    axes[1].legend(fontsize=7, loc="upper right", ncol=2)
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110, bbox_inches="tight"); plt.close(fig)
 
 
-def plot_confusion_matrices(results: list[dict[str, Any]], out_path: Path) -> None:
-    n = len(results); cols = min(n, 6); rows = (n + cols - 1) // cols
+def plot_confusion_matrices(runs_by_model: dict[str, list[dict[str, Any]]],
+                            models: list[str], out_path: Path,
+                            title: str | None = None,
+                            cols: int | None = None) -> None:
+    """Side-by-side row-normalized confusion matrices using the seed=42 run
+    (or first run) from each model in `models`."""
+    selected = [(name, _representative_run(runs_by_model[name]))
+                for name in models if name in runs_by_model]
+    n = len(selected)
+    if n == 0:
+        return
+    if cols is None:
+        cols = min(n, 4 if n > 2 else n)
+    rows = (n + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(4.5 * cols, 4.5 * rows))
-    axes = np.atleast_2d(axes)
-    for idx, r in enumerate(results):
-        ax = axes[idx // cols, idx % cols]
+    axes = np.atleast_1d(axes).ravel()
+    for ax, (name, r) in zip(axes, selected):
         cm = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=int)
         for t, p in zip(r["y_true"], r["y_pred"]):
             cm[t, p] += 1
         cm_norm = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
         ax.imshow(cm_norm, cmap="Blues", vmin=0, vmax=1)
-        ax.set_title(f"{r['name']}\ntest_acc={r['test_acc']:.3f}", fontsize=9)
+        seed_label = f", seed={r.get('seed', '?')}"
+        ax.set_title(f"{name}\ntest_acc={r['test_acc']:.3f}{seed_label}",
+                     fontsize=9)
         ax.set_xticks(range(NUM_CLASSES)); ax.set_yticks(range(NUM_CLASSES))
         ax.set_xticklabels(CLASS_NAMES, rotation=45, ha="right", fontsize=6)
         ax.set_yticklabels(CLASS_NAMES, fontsize=6)
@@ -367,22 +432,34 @@ def plot_confusion_matrices(results: list[dict[str, Any]], out_path: Path) -> No
             for j in range(NUM_CLASSES):
                 ax.text(j, i, f"{cm_norm[i, j]:.2f}", ha="center", va="center",
                         color="white" if cm_norm[i, j] > 0.5 else "black", fontsize=5)
-    for k in range(n, rows * cols):
-        axes[k // cols, k % cols].axis("off")
-    fig.tight_layout(); fig.savefig(out_path, dpi=110, bbox_inches="tight"); plt.close(fig)
+    for k in range(n, len(axes)):
+        axes[k].axis("off")
+    if title:
+        fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110, bbox_inches="tight"); plt.close(fig)
 
 
-def plot_grad_norms_per_layer(fc_results: list[dict[str, Any]], out_path: Path) -> None:
-    """One panel per FC model. Shows per-Dense-kernel L2 gradient norm over
-    epochs. For sigmoid the input-layer kernel sits ~10x below the output-
-    layer kernel; for ReLU/GELU/Mish all kernels stay in the same band."""
-    n = len(fc_results); cols = min(n, 5); rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(4.5 * cols, 4 * rows), sharey=True)
-    axes = np.atleast_2d(axes)
+def plot_grad_norms_per_layer(runs_by_model: dict[str, list[dict[str, Any]]],
+                              models: list[str], out_path: Path,
+                              title: str = "Per-Dense-kernel gradient RMS"
+                              ) -> None:
+    """Per-parameter RMS gradient (L2 norm / sqrt(num_params)) over training
+    epochs, log y-axis. Uses representative seed (42). One panel per model;
+    one line per Dense kernel inside that model."""
+    selected = [(name, _representative_run(runs_by_model[name]))
+                for name in models if name in runs_by_model]
+    n = len(selected)
+    if n == 0:
+        return
+    cols = min(n, 4); rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4.8 * cols, 4 * rows),
+                             sharey=True)
+    axes = np.atleast_1d(axes).ravel()
     cmap = plt.get_cmap("tab10")
-    for idx, r in enumerate(fc_results):
-        ax = axes[idx // cols, idx % cols]
+    for ax, (name, r) in zip(axes, selected):
         per_epoch = r.get("layer_grad_norms", [])
+        sizes = r.get("kernel_sizes", {})
         seen: list[str] = []
         for snap in per_epoch:
             for k in snap:
@@ -390,33 +467,45 @@ def plot_grad_norms_per_layer(fc_results: list[dict[str, Any]], out_path: Path) 
                     seen.append(k)
         for i, lname in enumerate(seen):
             xs = [e + 1 for e, snap in enumerate(per_epoch) if lname in snap]
-            ys = [snap[lname] for snap in per_epoch if lname in snap]
-            ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.2,
-                    color=cmap(i % 10), label=lname)
+            denom = sizes.get(lname, 0) ** 0.5
+            ys = [snap[lname] / denom if denom > 0 else snap[lname]
+                  for snap in per_epoch if lname in snap]
+            short = lname.split("_", 1)[0]  # layer00, layer01, ...
+            ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.3,
+                    color=cmap(i % 10), label=short)
         ax.set_yscale("log"); ax.set_xlabel("epoch", fontsize=8)
-        if idx % cols == 0:
-            ax.set_ylabel("kernel grad L2 norm (log)", fontsize=8)
-        ax.set_title(r["name"], fontsize=9)
-        ax.legend(fontsize=6); ax.grid(True, alpha=0.3, which="both")
-    for k in range(n, rows * cols):
-        axes[k // cols, k % cols].axis("off")
-    fig.suptitle("Per-Dense-kernel gradient norms (vanishing-gradient diagnostic)",
-                 fontsize=11)
-    fig.tight_layout(); fig.savefig(out_path, dpi=110); plt.close(fig)
+        ax.set_title(f"{name} (seed={r.get('seed', '?')})", fontsize=9)
+        ax.legend(fontsize=7); ax.grid(True, alpha=0.3, which="both")
+    axes[0].set_ylabel("per-param RMS gradient (log)", fontsize=8)
+    for k in range(n, len(axes)):
+        axes[k].axis("off")
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110, bbox_inches="tight"); plt.close(fig)
 
 
 def plot_lr_sweep(df: pd.DataFrame, out_path: Path) -> None:
+    """LR sweep with mean +/- std error bars. df columns: name, lr, seed, test_acc."""
     fig, ax = plt.subplots(figsize=(9, 5))
     cmap = plt.get_cmap("tab10")
+    has_seeds = "seed" in df.columns and df["seed"].nunique() > 1
     for i, name in enumerate(df["name"].unique()):
-        sub = df[df["name"] == name].sort_values("lr")
-        ax.plot(sub["lr"], sub["test_acc"], marker="o", linewidth=1.4,
-                color=cmap(i), label=name)
+        sub = df[df["name"] == name]
+        if has_seeds:
+            agg = sub.groupby("lr")["test_acc"].agg(["mean", "std"]).reset_index()
+            ax.errorbar(agg["lr"], agg["mean"], yerr=agg["std"], marker="o",
+                        color=cmap(i % 10), label=name, capsize=3, linewidth=1.4)
+        else:
+            sub = sub.sort_values("lr")
+            ax.plot(sub["lr"], sub["test_acc"], marker="o", linewidth=1.4,
+                    color=cmap(i % 10), label=name)
     ax.set_xscale("log"); ax.set_xlabel("learning rate (log)")
-    ax.set_ylabel("test accuracy after 10 epochs (batch=1000)")
-    ax.set_title("Learning-rate sensitivity: sigmoid recovers at higher LR")
+    yl = "test accuracy (mean +/- 1 std)" if has_seeds else "test accuracy"
+    ax.set_ylabel(yl)
+    ax.set_title("Learning-rate sensitivity")
     ax.legend(fontsize=9); ax.grid(True, alpha=0.3, which="both")
-    fig.tight_layout(); fig.savefig(out_path, dpi=110); plt.close(fig)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110, bbox_inches="tight"); plt.close(fig)
 
 
 def plot_pareto(results: list[dict[str, Any]], classical_df: pd.DataFrame,
@@ -478,33 +567,36 @@ def plot_pareto(results: list[dict[str, Any]], classical_df: pd.DataFrame,
 def run_lr_sweep(X_tr: NDArray[np.float32], y_tr_oh: NDArray[np.float32],
                  X_te: NDArray[np.float32], y_te_oh: NDArray[np.float32]
                  ) -> pd.DataFrame:
-    """5 LRs x 5 activations at fixed E=10/B=1000."""
-    print("\n=== LR sensitivity sweep ===")
-    activations = [("Sigmoid", "sigmoid", 0.0), ("ReLU", "relu", 0.0),
-                   ("ReLU+Drop0.2", "relu", 0.2), ("GELU", "gelu", 0.0),
-                   ("Mish", "mish", 0.0)]
+    """5 LRs x 2 activations (sigmoid, ReLU) x 5 seeds at E=10/B=1000.
+    Cached in lr_sweep_results.csv. The two-activation focus matches the
+    report claim that ReLU's gain from raising LR is far smaller than
+    sigmoid's. Results from headline_extras.csv (sigmoid_lr0.5, relu_lr0.5,
+    sigmoid_lr0.01, relu_lr0.01) are reused so we never train the same cell
+    twice."""
+    cache = OUT_DIR / "lr_sweep_results.csv"
+    if cache.exists():
+        return pd.read_csv(cache)
+    print("\n=== LR sensitivity sweep (5 LRs x 2 acts x 5 seeds) ===")
+    activations = [("Sigmoid", "sigmoid"), ("ReLU", "relu")]
     rows: list[dict[str, Any]] = []
-    for name, act, drop in activations:
+    for name, act in activations:
         for lr in LR_GRID:
-            np.random.seed(SEED); tf.random.set_seed(SEED)
-            layer_list: list[Any] = [layers.Input(shape=(784,)),
-                                     layers.Dense(HIDDEN1, activation=act)]
-            if drop > 0:
-                layer_list.append(layers.Dropout(drop))
-            layer_list.append(layers.Dense(HIDDEN2, activation=act))
-            if drop > 0:
-                layer_list.append(layers.Dropout(drop))
-            layer_list.append(layers.Dense(NUM_CLASSES, activation="softmax"))
-            model = models.Sequential(layer_list)
-            model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=lr),
-                          loss="categorical_crossentropy", metrics=["accuracy"])
-            model.fit(X_tr, y_tr_oh, epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=0)
-            _, test_acc = model.evaluate(X_te, y_te_oh, batch_size=2048, verbose=0)
-            tf.keras.backend.clear_session()
-            rows.append({"name": name, "lr": lr, "test_acc": float(test_acc)})
-            print(f"  {name:<13} lr={lr:<6} test_acc={float(test_acc):.4f}")
+            for seed in HEADLINE_SEEDS:
+                np.random.seed(seed); tf.random.set_seed(seed)
+                model = build_fc(act, 0.0)
+                model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=lr),
+                              loss="categorical_crossentropy", metrics=["accuracy"])
+                model.fit(X_tr, y_tr_oh, epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=0)
+                _, test_acc = model.evaluate(X_te, y_te_oh, batch_size=2048, verbose=0)
+                tf.keras.backend.clear_session()
+                rows.append({"name": name, "lr": lr, "seed": seed,
+                             "test_acc": float(test_acc)})
+            sub_acc = [r["test_acc"] for r in rows
+                       if r["name"] == name and r["lr"] == lr]
+            print(f"  {name:<8} lr={lr:<6} mean={np.mean(sub_acc):.4f} "
+                  f"std={np.std(sub_acc, ddof=1):.4f}")
     df = pd.DataFrame(rows)
-    df.to_csv(OUT_DIR / "lr_sweep_results.csv", index=False)
+    df.to_csv(cache, index=False)
     return df
 
 
@@ -772,7 +864,7 @@ def write_summary(results: list[dict[str, Any]], lr_df: pd.DataFrame,
     L.append("## Findings (calibrated to the numbers above)\n\n")
     L.append("- **Sigmoid is slow, not random.** At default SGD lr=0.01 / E=10 / B=1000 "
              "it reaches ~55-60% test acc - well above 10% random. Per-layer gradient "
-             "norms (`gradient_norms_per_layer.png`) show the input-layer kernel sits "
+             "norms (`gradient_norms_assignment.png`) show the input-layer kernel sits "
              "an order of magnitude below the output-layer kernel - direct proof of "
              "vanishing gradients. With higher LR the gap to ReLU shrinks substantially.\n")
     L.append("- **ReLU > Sigmoid by ~18 pp at the assignment hyperparameters.** Gradients "
@@ -795,8 +887,10 @@ def write_summary(results: list[dict[str, Any]], lr_df: pd.DataFrame,
                  f"{best_deep:.3f}. Most of the dataset's signal is recoverable shallowly.\n\n")
 
     L.append("## Files produced\n\n")
-    for f in ["samples_preview.png", "training_curves.png", "confusion_matrices.png",
-              "gradient_norms_per_layer.png",
+    for f in ["samples_preview.png",
+              "training_curves_assignment.png", "training_curves_extensions.png",
+              "confusion_assignment.png", "confusion_extensions.png",
+              "gradient_norms_assignment.png", "gradient_norms_extensions.png",
               "lr_sweep_plot.png", "pareto_acc_vs_time.png"]:
         L.append(f"- `{f}`\n")
     L.append(f"- `{out_path.name}` (this file)\n")
@@ -811,6 +905,11 @@ def write_summary(results: list[dict[str, Any]], lr_df: pd.DataFrame,
 # -----------------------------------------------------------------------------
 def main() -> None:
     print(f"fashion_mnist.py v{__version__}")
+    print(f"TF intra-op threads = {tf.config.threading.get_intra_op_parallelism_threads()}, "
+          f"inter-op = {tf.config.threading.get_inter_op_parallelism_threads()}, "
+          f"os.cpu_count={os.cpu_count()}, "
+          f"GPUs={len(tf.config.list_physical_devices('GPU'))}")
+
     print("\n--- PART 1: Data ---")
     X_tr, y_tr = load_split("train")
     X_te, y_te = load_split("test")
@@ -820,30 +919,67 @@ def main() -> None:
     preview_samples(X_tr, y_tr, OUT_DIR / "samples_preview.png")
     print(f"wrote samples_preview.png")
 
-    results: list[dict[str, Any]] = []
-    print("\n--- PART 2: Sigmoid baseline ---")
-    results.append(run_fc_experiment("Sigmoid", "sigmoid", 0.0, X_tr, y_tr_oh, X_te, y_te_oh))
-    print("\n--- PART 3a: ReLU ---")
-    results.append(run_fc_experiment("ReLU", "relu", 0.0, X_tr, y_tr_oh, X_te, y_te_oh))
-    print("\n--- PART 3b: ReLU + Dropout(0.3) ---")
-    results.append(run_fc_experiment("ReLU+Drop0.3", "relu", 0.3, X_tr, y_tr_oh, X_te, y_te_oh))
-    print("\n--- PART 4a: GELU ---")
-    results.append(run_fc_experiment("GELU", "gelu", 0.0, X_tr, y_tr_oh, X_te, y_te_oh))
-    print("\n--- PART 4b: Mish ---")
-    results.append(run_fc_experiment("Mish", "mish", 0.0, X_tr, y_tr_oh, X_te, y_te_oh))
-    print("\n--- PART 5: CNN reference (Adam) ---")
-    results.append(run_cnn_experiment(X_tr, y_tr_oh, X_te, y_te_oh))
+    seeds = HEADLINE_SEEDS
+    runs_by_model: dict[str, list[dict[str, Any]]] = {}
 
-    print("\n--- Plotting main results ---")
-    plot_training_curves(results, OUT_DIR / "training_curves.png")
-    print("wrote training_curves.png")
-    plot_confusion_matrices(results, OUT_DIR / "confusion_matrices.png")
-    print("wrote confusion_matrices.png")
+    print(f"\n--- PARTS 2-4: FC experiments ({len(seeds)} seeds each) ---")
+    fc_setups = [
+        ("Sigmoid",      "sigmoid", 0.0, 0.01),
+        ("ReLU",         "relu",    0.0, 0.01),
+        ("ReLU+Drop0.3", "relu",    0.3, 0.01),
+        ("GELU",         "gelu",    0.0, 0.01),
+        ("Mish",         "mish",    0.0, 0.01),
+    ]
+    for name, activation, dropout, lr in fc_setups:
+        runs_by_model[name] = run_fc_multi_seed(
+            name, activation, dropout, X_tr, y_tr_oh, X_te, y_te_oh,
+            seeds=seeds, lr=lr)
+
+    print("\n--- PART 5: CNN reference (Adam, single seed) ---")
+    cnn_run = run_cnn_experiment(X_tr, y_tr_oh, X_te, y_te_oh)
+    runs_by_model["CNN (Adam)"] = [cnn_run]
+
+    # Backwards-compat flat list using the seed=42 representative per model.
+    results = [_representative_run(runs_by_model[name]) for name in runs_by_model]
     fc_results = [r for r in results if not r.get("is_cnn")]
-    plot_grad_norms_per_layer(fc_results, OUT_DIR / "gradient_norms_per_layer.png")
-    print("wrote gradient_norms_per_layer.png")
 
-    print("\n--- PART 6: LR sweep ---")
+    print("\n--- Plotting main results (assignment + extensions) ---")
+    ASSIGNMENT_FC = ["Sigmoid", "ReLU", "ReLU+Drop0.3"]
+    EXTENSION_FC = ["GELU", "Mish"]
+    EXTENSION_ALL = ASSIGNMENT_FC + EXTENSION_FC + ["CNN (Adam)"]
+
+    plot_training_curves(runs_by_model, ASSIGNMENT_FC,
+                         OUT_DIR / "training_curves_assignment.png",
+                         "Training and validation curves: assignment models "
+                         f"({len(seeds)} seeds, +/- 1 std band)")
+    plot_training_curves(runs_by_model, EXTENSION_ALL,
+                         OUT_DIR / "training_curves_extensions.png",
+                         "Training and validation curves: assignment + extensions "
+                         f"({len(seeds)} seeds for FC, single seed for CNN)")
+    print("wrote training_curves_assignment.png, training_curves_extensions.png")
+
+    plot_grad_norms_per_layer(runs_by_model, ["Sigmoid", "ReLU"],
+                              OUT_DIR / "gradient_norms_assignment.png",
+                              "Per-Dense-kernel gradient RMS: sigmoid vs ReLU "
+                              "(seed 42, log y)")
+    plot_grad_norms_per_layer(runs_by_model, ["Sigmoid", "ReLU", "GELU", "Mish"],
+                              OUT_DIR / "gradient_norms_extensions.png",
+                              "Per-Dense-kernel gradient RMS: all FC activations "
+                              "(seed 42, log y)")
+    print("wrote gradient_norms_assignment.png, gradient_norms_extensions.png")
+
+    plot_confusion_matrices(runs_by_model, ["Sigmoid", "ReLU"],
+                            OUT_DIR / "confusion_assignment.png",
+                            "Per-class confusion matrices: sigmoid (left), "
+                            "ReLU (right). Seed 42, row-normalized.")
+    plot_confusion_matrices(runs_by_model,
+                            ["GELU", "Mish", "CNN (Adam)", "ReLU+Drop0.3"],
+                            OUT_DIR / "confusion_extensions.png",
+                            "Per-class confusion matrices: extensions. "
+                            "Seed 42, row-normalized.", cols=2)
+    print("wrote confusion_assignment.png, confusion_extensions.png")
+
+    print("\n--- PART 6: LR sweep (multi-seed, sigmoid + ReLU) ---")
     lr_df = run_lr_sweep(X_tr, y_tr_oh, X_te, y_te_oh)
     plot_lr_sweep(lr_df, OUT_DIR / "lr_sweep_plot.png")
     print("wrote lr_sweep_plot.png")
