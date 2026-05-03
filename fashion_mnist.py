@@ -104,6 +104,16 @@ from numpy.typing import NDArray
 import pandas as pd
 import tensorflow as tf
 tf.get_logger().setLevel("ERROR")
+
+# Force TF to use multiple intra-op threads. TF 2.16+ on some Windows builds
+# defaults to a single thread which leaves modern multi-core CPUs at ~20%
+# utilization. min(8, cpu_count) covers a 7800X3D (16T -> uses 8) without
+# oversubscribing; on Colab's 2-vCPU runtime TF auto-clamps to the available
+# cores and the call is a no-op.
+_CPU = os.cpu_count() or 4
+tf.config.threading.set_intra_op_parallelism_threads(min(8, _CPU))
+tf.config.threading.set_inter_op_parallelism_threads(min(2, _CPU))
+
 from tensorflow.keras import layers, models
 
 OUT_DIR = Path(r"c:\temp\temp\fashion")
