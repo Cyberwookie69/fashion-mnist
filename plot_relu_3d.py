@@ -13,9 +13,10 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-MATRIX_CSV = Path(r"c:\temp\temp\fashion\matrix_results.csv")
-RELU_CSV = Path(r"c:\temp\temp\fashion\relu_sweep.csv")
-OUT = Path(r"c:\temp\temp\fashion\relu_3d.png")
+OUT_DIR = Path(r"c:\temp\temp\fashion")
+MATRIX_CSV = OUT_DIR / "matrix_results.csv"
+RELU_CSV = OUT_DIR / "relu_sweep.csv"
+OUT = OUT_DIR / "relu_3d.png"
 
 
 def get_relu_data() -> pd.DataFrame:

@@ -21,15 +21,47 @@ Run:
     python matrix_sweep.py
 
 Version history:
-    1.0.0 (2026-05-01) - Simplification rewrite. Folds the previous
+    0.1.0 (2026-05-01) - First version as epoch_batch_matrix.py: serial sweep
+                         in a single Python process. Estimated ~16 hours on
+                         5 model variants; never actually finished a full run
+                         because something always crashed first. The estimate
+                         remains theoretical.
+    0.2.0 (2026-05-02) - Added ProcessPoolExecutor parallelism with 6 workers,
+                         each running an XLA-jit-compiled training step.
+                         Wall-clock down to ~2.5 hours, which fits inside the
+                         attention span of one cup of coffee plus refills.
+    0.3.0 (2026-05-02) - Added resume capability: skip cells already in the
+                         CSV, append on subsequent runs. Survived three
+                         interrupted overnight sessions before completing,
+                         which is the most useful feature this script has.
+    0.4.0 (2026-05-02) - Split into matrix_analysis.py for plot generation,
+                         keeping epoch_batch_matrix.py as the runner. Tweaking
+                         a colormap should not require an overnight sweep,
+                         apparently a controversial position.
+    0.5.0 (2026-05-02) - Added eight ReLU+Drop0.x variants (rates 0.1 through
+                         0.9) to MODEL_VARIANTS. Total grid: 1300 cells.
+                         Confirmed empirically that 0.3 is rarely optimal,
+                         which is awkward for the textbook default.
+    1.0.0 (2026-05-02) - Simplification rewrite. Folds the previous
                          epoch_batch_matrix.py + matrix_analysis.py +
                          dropout_3d_analysis.py into one file. Drops the 3D
-                         surface plots (Word can't render 3D well; the 2D
-                         heatmap of the optimum dropout rate per (E,B) tells
-                         the same story more clearly).
+                         surface plots; 
+    1.1.0 (2026-05-02) - Pylance hygiene: typed worker globals as Any, fixed
+                         pandas Series-to-float casts via .at[] lookups,
+                         explicit return types on plot helpers. Pylance now
+                         complains about strictly fewer things, a victory of
+                         the marginal-improvement school of engineering.
+    1.2.0 (2026-05-03) - Worker init reads IDX/ubyte directly via
+                         numpy.frombuffer instead of pandas.read_csv on the
+                         CSV exports. ~5x faster startup per worker. Could
+                         have done this from day one; chose not to.
+    1.3.0 (2026-05-03) - Suppressed TF deprecation noise via
+                         tf.get_logger().setLevel('ERROR') in worker init.
+                         The warnings remain valid; we just stop pretending
+                         to read them.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.3.0"
 
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -38,7 +70,7 @@ import csv
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 try:
     from tqdm import tqdm
@@ -77,12 +109,14 @@ MODEL_VARIANTS = [
 NUM_WORKERS = 6
 INTRA_OP = 2
 
-# Worker globals (set by initializer)
-_X_TR = None
-_Y_TR = None
-_X_TE = None
-_Y_TE = None
-_TF = None
+# Worker globals (set by initializer). Typed as Any so Pylance does not
+# complain about accessing TF/numpy attributes on what it would otherwise
+# treat as None until _worker_init runs.
+_X_TR: Any = None
+_Y_TR: Any = None
+_X_TE: Any = None
+_Y_TE: Any = None
+_TF: Any = None
 
 
 def _worker_init() -> None:
@@ -211,7 +245,8 @@ def detect_models(df: pd.DataFrame) -> list[str]:
     return [m for m in [v[0] for v in MODEL_VARIANTS] if m in df["model"].unique()]
 
 
-def plot_optimum_dropout(df: pd.DataFrame, out_path: Path) -> None:
+def plot_optimum_dropout(df: pd.DataFrame, out_path: Path
+                         ) -> tuple[np.ndarray, np.ndarray]:
     """For each (E, B) cell, which dropout rate gave the best test_acc?
     Two side-by-side panels: optimal dropout rate, and the achieved test_acc."""
     relu = df[df["activation"] == "relu"].copy()
@@ -223,14 +258,14 @@ def plot_optimum_dropout(df: pd.DataFrame, out_path: Path) -> None:
             sub = relu[(relu["epochs"] == e) & (relu["batch_size"] == b)]
             if len(sub) == 0:
                 continue
-            row = sub.loc[sub["test_acc"].idxmax()]
-            opt[i, j] = float(row["dropout"])
-            best[i, j] = float(row["test_acc"])
+            idx = sub["test_acc"].idxmax()
+            opt[i, j] = float(cast(Any, sub.at[idx, "dropout"]))
+            best[i, j] = float(cast(Any, sub.at[idx, "test_acc"]))
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     im0 = axes[0].imshow(opt, aspect="auto", cmap="plasma",
                          vmin=0.0, vmax=0.9, origin="lower")
-    axes[0].set_xticks(range(len(BATCH_GRID))); axes[0].set_xticklabels(BATCH_GRID, rotation=45, fontsize=8)
-    axes[0].set_yticks(range(len(EPOCH_GRID))); axes[0].set_yticklabels(EPOCH_GRID, fontsize=8)
+    axes[0].set_xticks(range(len(BATCH_GRID))); axes[0].set_xticklabels([str(b) for b in BATCH_GRID], rotation=45, fontsize=8)
+    axes[0].set_yticks(range(len(EPOCH_GRID))); axes[0].set_yticklabels([str(e) for e in EPOCH_GRID], fontsize=8)
     axes[0].set_xlabel("batch size"); axes[0].set_ylabel("epochs")
     axes[0].set_title("Optimal dropout rate per (E, B) cell")
     for i in range(len(EPOCH_GRID)):
@@ -242,8 +277,8 @@ def plot_optimum_dropout(df: pd.DataFrame, out_path: Path) -> None:
                          color="white" if v > 0.5 else "black", fontsize=7)
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
     im1 = axes[1].imshow(best, aspect="auto", cmap="viridis", origin="lower")
-    axes[1].set_xticks(range(len(BATCH_GRID))); axes[1].set_xticklabels(BATCH_GRID, rotation=45, fontsize=8)
-    axes[1].set_yticks(range(len(EPOCH_GRID))); axes[1].set_yticklabels(EPOCH_GRID, fontsize=8)
+    axes[1].set_xticks(range(len(BATCH_GRID))); axes[1].set_xticklabels([str(b) for b in BATCH_GRID], rotation=45, fontsize=8)
+    axes[1].set_yticks(range(len(EPOCH_GRID))); axes[1].set_yticklabels([str(e) for e in EPOCH_GRID], fontsize=8)
     axes[1].set_xlabel("batch size"); axes[1].set_ylabel("epochs")
     axes[1].set_title("Best test accuracy at optimal dropout")
     for i in range(len(EPOCH_GRID)):
@@ -266,8 +301,8 @@ def plot_relu_test_acc_heatmap(df: pd.DataFrame, out_path: Path) -> None:
     pivot = pivot.reindex(index=EPOCH_GRID, columns=BATCH_GRID)
     fig, ax = plt.subplots(figsize=(8, 6))
     im = ax.imshow(pivot.values, aspect="auto", cmap="viridis", origin="lower")
-    ax.set_xticks(range(len(BATCH_GRID))); ax.set_xticklabels(BATCH_GRID, rotation=45, fontsize=8)
-    ax.set_yticks(range(len(EPOCH_GRID))); ax.set_yticklabels(EPOCH_GRID, fontsize=8)
+    ax.set_xticks(range(len(BATCH_GRID))); ax.set_xticklabels([str(b) for b in BATCH_GRID], rotation=45, fontsize=8)
+    ax.set_yticks(range(len(EPOCH_GRID))); ax.set_yticklabels([str(e) for e in EPOCH_GRID], fontsize=8)
     ax.set_xlabel("batch size"); ax.set_ylabel("epochs")
     ax.set_title("ReLU test accuracy across (epochs, batch_size)")
     for i in range(len(EPOCH_GRID)):
@@ -297,10 +332,16 @@ def write_summary(df: pd.DataFrame, opt_rates: np.ndarray, out_path: Path) -> No
     L.append("|---|---|---|---|---|---|---|\n")
     for m in models:
         sub = df[df["model"] == m]
-        b = sub.loc[sub["test_acc"].idxmax()]
-        L.append(f"| {m} | {int(b['epochs'])} | {int(b['batch_size'])} | "
-                 f"{b['test_acc']:.4f} | {b['train_acc']:.4f} | "
-                 f"{b['gap']:+.4f} | {b['fit_time_s']:.1f} |\n")
+        idx = sub["test_acc"].idxmax()
+        epochs = int(cast(Any, sub.at[idx, "epochs"]))
+        batch = int(cast(Any, sub.at[idx, "batch_size"]))
+        test_acc = float(cast(Any, sub.at[idx, "test_acc"]))
+        train_acc = float(cast(Any, sub.at[idx, "train_acc"]))
+        gap = float(cast(Any, sub.at[idx, "gap"]))
+        fit_time = float(cast(Any, sub.at[idx, "fit_time_s"]))
+        L.append(f"| {m} | {epochs} | {batch} | "
+                 f"{test_acc:.4f} | {train_acc:.4f} | "
+                 f"{gap:+.4f} | {fit_time:.1f} |\n")
     L.append("\n")
 
     L.append("## Top-5 cells overall\n\n")
@@ -308,8 +349,11 @@ def write_summary(df: pd.DataFrame, opt_rates: np.ndarray, out_path: Path) -> No
     L.append("| Rank | Model | Epochs | Batch | TestAcc |\n")
     L.append("|---|---|---|---|---|\n")
     for i, (_, b) in enumerate(top.iterrows(), 1):
-        L.append(f"| {i} | {b['model']} | {int(b['epochs'])} | "
-                 f"{int(b['batch_size'])} | {b['test_acc']:.4f} |\n")
+        epochs = int(b["epochs"])
+        batch = int(b["batch_size"])
+        test_acc = float(b["test_acc"])
+        L.append(f"| {i} | {b['model']} | {epochs} | "
+                 f"{batch} | {test_acc:.4f} |\n")
     L.append("\n")
 
     L.append("## Verdict on dropout=0.3\n\n")

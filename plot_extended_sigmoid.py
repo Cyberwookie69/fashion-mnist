@@ -21,8 +21,9 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-CSV_OUT = Path(r"c:\temp\temp\fashion\sigmoid_extended.csv")
-PNG_OUT = Path(r"c:\temp\temp\fashion\sigmoid_extended_3d.png")
+OUT_DIR = Path(r"c:\temp\temp\fashion")
+CSV_OUT = OUT_DIR / "sigmoid_extended.csv"
+PNG_OUT = OUT_DIR / "sigmoid_extended_3d.png"
 
 EPOCH_GRID_EXT = [10, 20, 40, 80, 160, 320, 640, 1280]
 BATCH_GRID_EXT = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]

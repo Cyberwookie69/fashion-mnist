@@ -16,9 +16,10 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-MATRIX_CSV = Path(r"c:\temp\temp\fashion\matrix_results.csv")
-SIGMOID_CSV = Path(r"c:\temp\temp\fashion\sigmoid_sweep.csv")
-OUT = Path(r"c:\temp\temp\fashion\sigmoid_3d.png")
+OUT_DIR = Path(r"c:\temp\temp\fashion")
+MATRIX_CSV = OUT_DIR / "matrix_results.csv"
+SIGMOID_CSV = OUT_DIR / "sigmoid_sweep.csv"
+OUT = OUT_DIR / "sigmoid_3d.png"
 
 
 def get_sigmoid_data() -> pd.DataFrame:
