@@ -4,7 +4,10 @@
 *.csv
 results_summary.md
 matrix_summary.md
-!classical_baselines.csv.example
+
+# ...except expensive-to-recompute sweep results (2 hours of compute)
+!matrix_results.csv
+!sigmoid_sweep.csv
 
 # Notebook checkpoints
 .ipynb_checkpoints/
