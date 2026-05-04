@@ -40,6 +40,9 @@ env/
 .idea/
 .claude/
 
+# Local archive of moved/deprecated scripts and outputs
+kanweg/
+
 # OS
 .DS_Store
 Thumbs.db

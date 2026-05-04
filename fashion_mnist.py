@@ -17,8 +17,9 @@ Plus extensions that earn marks:
 Outputs (everything Word needs):
     samples_preview.png             - Figure 1: ten random training samples
     training_curves.png             - Figure 2: 5-series train/val curves with bands
-    gradient_norms_per_layer.png    - Figure 3: sigmoid vs ReLU, 6-line overlay, log y
+    gradient_norms_per_layer.png    - Figure 3: sigmoid vs ReLU vs ReLU+Drop0.3 overlay
     per_class_accuracy.csv          - Table 1 source for the Word document
+    sigmoid_relu_3d.png             - Optional: 3D wireframe overlay from matrix sweep
     results_summary.md              - one consolidated markdown report
 
 Run:
@@ -107,9 +108,16 @@ Version history:
                          pairs; the report does not reference them. Underlying
                          LR sweep, multi-seed top-5 and headline-variance still
                          run because their numbers are cited in text.
+    1.10.0 (2026-05-04) - Folded plot_sigmoid_relu_3d.py into fashion_mnist.py.
+                          The 3D wireframe overlay (sigmoid red, ReLU blue,
+                          per-activation optimum stars) writes sigmoid_relu_3d.png
+                          when matrix_results.csv is present. Layer markers added
+                          to the gradient overlay (input=circle, hidden=square,
+                          output=triangle) plus ReLU+Drop0.3 in green; standalone
+                          plot scripts and view_ubyte.py archived to kanweg/.
 """
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -459,12 +467,13 @@ def plot_grad_norms_overlay(runs_by_model: dict[str, list[dict[str, Any]]],
         return
     fig, ax = plt.subplots(figsize=(9, 5.5))
     color_families = {
-        "Sigmoid":      ["#fcae91", "#fb6a4a", "#a50f15"],
-        "ReLU":         ["#9ecae1", "#3182bd", "#08306b"],
-        "ReLU+Drop0.3": ["#fdbe85", "#fd8d3c", "#a63603"],
-        "GELU":         ["#a1d99b", "#31a354", "#00441b"],
-        "Mish":         ["#bcbddc", "#756bb1", "#3f007d"],
+        "Sigmoid":      ["#fcae91", "#fb6a4a", "#a50f15"],   # red shades
+        "ReLU":         ["#9ecae1", "#3182bd", "#08306b"],   # blue shades
+        "ReLU+Drop0.3": ["#c7e9c0", "#41ab5d", "#00441b"],   # green shades
+        "GELU":         ["#cbc9e2", "#756bb1", "#54278f"],   # purple shades
+        "Mish":         ["#fdd0a2", "#fd8d3c", "#8c2d04"],   # orange shades
     }
+    layer_markers = ["o", "s", "^"]   # input, hidden, output
     fallback = plt.get_cmap("tab10")
     for mi, (name, r) in enumerate(selected):
         per_epoch = r.get("layer_grad_norms", [])
@@ -484,7 +493,8 @@ def plot_grad_norms_overlay(runs_by_model: dict[str, list[dict[str, Any]]],
             else:
                 color = fallback((mi * 3 + i) % 10)
             layer_short = "input" if i == 0 else "output" if i == len(seen) - 1 else f"hidden{i}"
-            ax.plot(xs, ys, marker="o", markersize=3.5, linewidth=1.4,
+            marker = layer_markers[min(i, len(layer_markers) - 1)]
+            ax.plot(xs, ys, marker=marker, markersize=4.5, linewidth=1.4,
                     color=color, label=f"{name} - {layer_short}")
     ax.set_yscale("log")
     ax.set_xlabel("epoch")
@@ -493,6 +503,129 @@ def plot_grad_norms_overlay(runs_by_model: dict[str, list[dict[str, Any]]],
     ax.legend(fontsize=8, loc="best", ncol=2)
     ax.grid(True, alpha=0.3, which="both")
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _build_3d_segments(Z: NDArray[np.floating[Any]], X_log: NDArray[np.floating[Any]],
+                       epoch_grid: list[int]
+                       ) -> tuple[list[list[tuple[float, float, float]]], list[float]]:
+    """Helper for the 3D wireframe overlay: produce line segments and their
+    midpoint z-values for matplotlib's Line3DCollection."""
+    Xg, Yg = np.meshgrid(X_log, epoch_grid)
+    segs: list[list[tuple[float, float, float]]] = []
+    z_mid: list[float] = []
+    rows, cols = Z.shape
+    for i in range(rows):
+        for j in range(cols):
+            z = Z[i, j]
+            if np.isnan(z):
+                continue
+            if j + 1 < cols and not np.isnan(Z[i, j + 1]):
+                segs.append([(Xg[i, j], Yg[i, j], z),
+                             (Xg[i, j + 1], Yg[i, j + 1], Z[i, j + 1])])
+                z_mid.append((z + Z[i, j + 1]) / 2)
+            if i + 1 < rows and not np.isnan(Z[i + 1, j]):
+                segs.append([(Xg[i, j], Yg[i, j], z),
+                             (Xg[i + 1, j], Yg[i + 1, j], Z[i + 1, j])])
+                z_mid.append((z + Z[i + 1, j]) / 2)
+    return segs, z_mid
+
+
+def plot_sigmoid_relu_3d(matrix_df: pd.DataFrame, out_path: Path) -> None:
+    """3D wiremesh overlay of Sigmoid vs ReLU test accuracy across (E, B).
+    Two activations on the same axes; sigmoid in red shades, ReLU in blue
+    shades, darker wire = higher accuracy within each activation. Per-
+    activation optimum marked with a star."""
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.lines import Line2D
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+    fig = plt.figure(figsize=(10, 8.5))
+    # Pylance does not narrow add_subplot(projection='3d') to Axes3D, so we
+    # tell it the result is Any and let the 3D-only attributes (set_zlim,
+    # zaxis, view_init, add_collection3d, ...) pass type checking.
+    ax: Any = fig.add_subplot(111, projection="3d")
+    ax.set_position((0.0, 0.04, 0.88, 0.84))
+
+    ranges: dict[str, tuple[float, float]] = {}
+    optima: dict[str, tuple[int, int, float]] = {}
+    palettes = [
+        ("Sigmoid", ["#fcae91", "#fb6a4a", "#a50f15"]),
+        ("ReLU",    ["#9ecae1", "#3182bd", "#08306b"]),
+    ]
+    for model_name, cmap_colors in palettes:
+        sub = matrix_df[matrix_df["model"] == model_name]
+        if len(sub) == 0:
+            print(f"  no {model_name} rows in matrix_results.csv, skipping")
+            continue
+        epoch_grid = sorted(sub["epochs"].unique())
+        batch_grid = sorted(sub["batch_size"].unique())
+        pivot = sub.pivot_table(index="epochs", columns="batch_size",
+                                values="test_acc")
+        pivot = pivot.reindex(index=epoch_grid, columns=batch_grid)
+        Z = pivot.values
+        X_log = np.log10(np.array(batch_grid, dtype=float))
+
+        segs, z_mid = _build_3d_segments(Z, X_log, epoch_grid)
+        cmap = LinearSegmentedColormap.from_list(f"{model_name}_cm", cmap_colors)
+        norm = Normalize(vmin=float(np.nanmin(Z)), vmax=float(np.nanmax(Z)))
+        colors = cmap(norm(np.array(z_mid)))
+        ax.add_collection3d(Line3DCollection(segs, colors=colors, linewidth=1.2))
+
+        best_i, best_j = np.unravel_index(np.nanargmax(Z), Z.shape)
+        ax.scatter([X_log[best_j]], [epoch_grid[best_i]], [Z[best_i, best_j]],
+                   color=cmap_colors[-1], s=120, marker="*",
+                   edgecolor="black", linewidth=0.7, zorder=10)
+        ranges[model_name] = (float(np.nanmin(Z)), float(np.nanmax(Z)))
+        optima[model_name] = (epoch_grid[best_i], batch_grid[best_j],
+                              float(Z[best_i, best_j]))
+
+    if not ranges:
+        plt.close(fig)
+        return
+
+    z_min = min(r[0] for r in ranges.values()) - 0.02
+    z_max = max(r[1] for r in ranges.values()) + 0.02
+    epoch_grid_ref = sorted(matrix_df["epochs"].unique())
+    batch_grid_ref = sorted(matrix_df["batch_size"].unique())
+    X_log_ref = np.log10(np.array(batch_grid_ref, dtype=float))
+    ax.set_xlim(X_log_ref.min() - 0.1, X_log_ref.max() + 0.1)
+    ax.set_ylim(min(epoch_grid_ref) - 5, max(epoch_grid_ref) + 5)
+    ax.set_zlim(z_min, z_max)
+    ax.set_xticks(X_log_ref)
+    ax.set_xticklabels([str(b) for b in batch_grid_ref], fontsize=9, rotation=30)
+    ax.set_yticks(epoch_grid_ref)
+    ax.tick_params(axis="y", labelsize=9)
+    z_ticks = [round(v, 2) for v in np.arange(0.1, 0.95, 0.1)]
+    ax.set_zticks(z_ticks)
+    ax.set_zticklabels([f"{v:.1f}" for v in z_ticks], fontsize=10)
+    ax.tick_params(axis="z", pad=6)
+    ax.set_xlabel("batch_size (log)", fontsize=11, labelpad=10)
+    ax.set_ylabel("epochs", fontsize=11, labelpad=10)
+    ax.set_zlabel("test accuracy", fontsize=11, labelpad=8)
+    ax.zaxis.set_rotate_label(False)
+    ax.zaxis.label.set_rotation(90)
+    ax.set_title("Sigmoid vs ReLU test accuracy over (epochs x batch_size)\n"
+                 "darker wire = higher accuracy within each activation",
+                 fontsize=12)
+    ax.view_init(elev=24, azim=-58)
+
+    handles: list[Line2D] = []
+    for name, color in [("Sigmoid", "#a50f15"), ("ReLU", "#08306b")]:
+        if name in ranges:
+            lo, hi = ranges[name]
+            handles.append(Line2D([0], [0], color=color, lw=2,
+                                  label=f"{name} ({lo:.2f}-{hi:.2f})"))
+    for name, color in [("Sigmoid", "#a50f15"), ("ReLU", "#08306b")]:
+        if name in optima:
+            e, b, a = optima[name]
+            handles.append(Line2D([0], [0], marker="*", color="white",
+                                  markerfacecolor=color, markeredgecolor="black",
+                                  markersize=12, linewidth=0,
+                                  label=f"{name} optimum: E={e}, B={b}, acc={a:.4f}"))
+    ax.legend(handles=handles, loc="upper left", fontsize=9, framealpha=0.9)
+
+    fig.savefig(out_path, dpi=300)
     plt.close(fig)
 
 
@@ -1019,6 +1152,12 @@ def main() -> None:
     print("\n--- Report extras: gradient ratios + headline seed variance ---")
     grad_ratios = gradient_ratios_table(fc_results)
     headlines = headline_seed_variance(X_tr, y_tr_oh, X_te, y_te_oh)
+
+    if MATRIX_CSV.exists():
+        print("\n--- 3D wireframe overlay (sigmoid vs ReLU from matrix sweep) ---")
+        plot_sigmoid_relu_3d(pd.read_csv(MATRIX_CSV),
+                             OUT_DIR / "sigmoid_relu_3d.png")
+        print("wrote sigmoid_relu_3d.png")
 
     print("\n--- Summary ---")
     write_summary(results, lr_df, classical_df, multiseed_df,
