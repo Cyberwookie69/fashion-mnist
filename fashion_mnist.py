@@ -116,7 +116,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -835,12 +835,31 @@ def write_summary(results: list[dict[str, Any]], lr_df: pd.DataFrame,
 
     if len(lr_df) > 0:
         L.append("## Learning-rate sensitivity\n\n")
-        pivot = lr_df.pivot(index="name", columns="lr", values="test_acc")
+        # Multi-seed lr_df has rows (name, lr, seed, test_acc); aggregate to
+        # mean +/- std per (name, lr) before pivoting. Falls back to a plain
+        # pivot for legacy single-seed CSVs that have no 'seed' column.
+        if "seed" in lr_df.columns:
+            agg = lr_df.groupby(["name", "lr"])["test_acc"].agg(["mean", "std"]).reset_index()
+            pivot = agg.pivot(index="name", columns="lr", values="mean")
+            std_pivot = agg.pivot(index="name", columns="lr", values="std")
+            L.append(f"5-seed mean test accuracy per (activation, learning rate); "
+                     f"std in parentheses.\n\n")
+        else:
+            pivot = lr_df.pivot(index="name", columns="lr", values="test_acc")
+            std_pivot = None
         L.append("| Activation | " + " | ".join(f"lr={lr}" for lr in LR_GRID) + " |\n")
         L.append("|---" * (len(LR_GRID) + 1) + "|\n")
         for name in pivot.index:
-            cells = " | ".join(f"{pivot.loc[name, lr]:.4f}" for lr in LR_GRID)
-            L.append(f"| {name} | {cells} |\n")
+            cells = []
+            for lr in LR_GRID:
+                m = float(cast(Any, pivot.loc[name, lr]))
+                s = (float(cast(Any, std_pivot.loc[name, lr]))
+                     if std_pivot is not None else float("nan"))
+                if not np.isnan(s):
+                    cells.append(f"{m:.4f} (+/-{s:.4f})")
+                else:
+                    cells.append(f"{m:.4f}")
+            L.append(f"| {name} | " + " | ".join(cells) + " |\n")
         sig = pivot.loc["Sigmoid"] if "Sigmoid" in pivot.index else None
         relu = pivot.loc["ReLU"] if "ReLU" in pivot.index else None
         if sig is not None and relu is not None:
