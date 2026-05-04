@@ -139,7 +139,6 @@ def plot() -> None:
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
     fig.colorbar(sm, ax=ax, fraction=0.04, pad=0.1, label="test accuracy")
 
-    fig.tight_layout()
     fig.savefig(PNG_OUT, dpi=120, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {PNG_OUT}")
