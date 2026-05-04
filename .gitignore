@@ -9,6 +9,9 @@ matrix_summary.md
 !matrix_results.csv
 !sigmoid_sweep.csv
 
+# ...and the Word-table source CSV (deliverable, not derived metric)
+!per_class_accuracy.csv
+
 # Notebook checkpoints
 .ipynb_checkpoints/
 

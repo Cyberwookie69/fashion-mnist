@@ -14,16 +14,11 @@ Plus extensions that earn marks:
     PART 7   - Classical sklearn baselines (LogReg + RandomForest)
     PART 8   - Multi-seed sanity check on top-5 cells from matrix_sweep.py
 
-Outputs (everything Word can paste):
-    samples_preview.png             - Part 1
-    training_curves_assignment.png  - sigmoid + ReLU + ReLU+Drop only (5 seeds)
-    training_curves_extensions.png  - assignment + GELU + Mish (5 seeds)
-    confusion_assignment.png        - sigmoid + ReLU only (seed 42)
-    confusion_extensions.png        - GELU + Mish + ReLU+Drop (seed 42)
-    gradient_norms_assignment.png   - sigmoid vs ReLU, log y, seed 42
-    gradient_norms_extensions.png   - all FC activations, log y, seed 42
-    lr_sweep_plot.png               - LR sensitivity (Part 6)
-    pareto_acc_vs_time.png          - final scoreboard incl. classical baselines
+Outputs (everything Word needs):
+    samples_preview.png             - Figure 1: ten random training samples
+    training_curves.png             - Figure 2: 5-series train/val curves with bands
+    gradient_norms_per_layer.png    - Figure 3: sigmoid vs ReLU, 6-line overlay, log y
+    per_class_accuracy.csv          - Table 1 source for the Word document
     results_summary.md              - one consolidated markdown report
 
 Run:
@@ -102,9 +97,19 @@ Version history:
                          comparing apples to oranges next to FC activation
                          choices; activation studies belong in their own
                          universe, architecture comparisons belong in another.
+    1.9.0 (2026-05-04) - Asset rationalization to match the restructured
+                         single-narrative Word document. Single training_curves.png
+                         (5 FC series), single gradient_norms_per_layer.png
+                         (sigmoid vs ReLU overlay, 6 lines, log y, 300 dpi).
+                         Auto-write per_class_accuracy.csv for the Word table.
+                         Stopped saving confusion_matrices.png, lr_sweep_plot.png,
+                         pareto_acc_vs_time.png and the _assignment / _extensions
+                         pairs; the report does not reference them. Underlying
+                         LR sweep, multi-seed top-5 and headline-variance still
+                         run because their numbers are cited in text.
 """
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -439,6 +444,77 @@ def plot_grad_norms_per_layer(runs_by_model: dict[str, list[dict[str, Any]]],
     fig.suptitle(title, fontsize=11)
     fig.tight_layout()
     fig.savefig(out_path, dpi=110, bbox_inches="tight"); plt.close(fig)
+
+
+def plot_grad_norms_overlay(runs_by_model: dict[str, list[dict[str, Any]]],
+                            models: list[str], out_path: Path,
+                            title: str = "Per-Dense-kernel gradient norms"
+                            ) -> None:
+    """Single-panel overlay: per-Dense-kernel L2 gradient norms vs epoch, log y.
+    Distinguishes activations by colour family (sigmoid red shades, ReLU blue
+    shades), layers by line darkness within the family. Seed=42 representative."""
+    selected = [(name, _representative_run(runs_by_model[name]))
+                for name in models if name in runs_by_model]
+    if not selected:
+        return
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    color_families = {
+        "Sigmoid": ["#fcae91", "#fb6a4a", "#a50f15"],
+        "ReLU":    ["#9ecae1", "#3182bd", "#08306b"],
+        "GELU":    ["#a1d99b", "#31a354", "#00441b"],
+        "Mish":    ["#bcbddc", "#756bb1", "#3f007d"],
+    }
+    fallback = plt.get_cmap("tab10")
+    for mi, (name, r) in enumerate(selected):
+        per_epoch = r.get("layer_grad_norms", [])
+        if not per_epoch:
+            continue
+        seen: list[str] = []
+        for snap in per_epoch:
+            for k in snap:
+                if k not in seen:
+                    seen.append(k)
+        family = color_families.get(name)
+        for i, lname in enumerate(seen):
+            xs = [e + 1 for e, snap in enumerate(per_epoch) if lname in snap]
+            ys = [snap[lname] for snap in per_epoch if lname in snap]
+            if family is not None and i < len(family):
+                color = family[i]
+            else:
+                color = fallback((mi * 3 + i) % 10)
+            layer_short = "input" if i == 0 else "output" if i == len(seen) - 1 else f"hidden{i}"
+            ax.plot(xs, ys, marker="o", markersize=3.5, linewidth=1.4,
+                    color=color, label=f"{name} - {layer_short}")
+    ax.set_yscale("log")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("kernel gradient L2 norm (log)")
+    ax.set_title(title)
+    ax.legend(fontsize=8, loc="best", ncol=2)
+    ax.grid(True, alpha=0.3, which="both")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_per_class_csv(results: list[dict[str, Any]], out_path: Path) -> None:
+    """Per-class test accuracy table for the Word document. Columns: class,
+    sigmoid, relu, gelu, mish. Order matches CLASS_NAMES exactly."""
+    selected_models = ["Sigmoid", "ReLU", "GELU", "Mish"]
+    per_class: dict[str, list[float]] = {m: [0.0] * NUM_CLASSES
+                                          for m in selected_models}
+    for r in results:
+        if r["name"] not in selected_models:
+            continue
+        for c in range(NUM_CLASSES):
+            mask = r["y_true"] == c
+            acc = float((r["y_pred"][mask] == c).mean()) if mask.any() else 0.0
+            per_class[r["name"]][c] = acc
+    lines = ["class,sigmoid,relu,gelu,mish"]
+    for c in range(NUM_CLASSES):
+        row = [CLASS_NAMES[c]]
+        for m in selected_models:
+            row.append(f"{per_class[m][c]:.3f}")
+        lines.append(",".join(row))
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def plot_lr_sweep(df: pd.DataFrame, out_path: Path) -> None:
@@ -842,10 +918,9 @@ def write_summary(results: list[dict[str, Any]], lr_df: pd.DataFrame,
 
     L.append("## Files produced\n\n")
     for f in ["samples_preview.png",
-              "training_curves_assignment.png", "training_curves_extensions.png",
-              "confusion_assignment.png", "confusion_extensions.png",
-              "gradient_norms_assignment.png", "gradient_norms_extensions.png",
-              "lr_sweep_plot.png", "pareto_acc_vs_time.png"]:
+              "training_curves.png",
+              "gradient_norms_per_layer.png",
+              "per_class_accuracy.csv"]:
         L.append(f"- `{f}`\n")
     L.append(f"- `{out_path.name}` (this file)\n")
     L.append("\nAlso (see `matrix_sweep.py`):\n- `matrix_results.csv`, "
@@ -893,46 +968,26 @@ def main() -> None:
     results = [_representative_run(runs_by_model[name]) for name in runs_by_model]
     fc_results = results
 
-    print("\n--- Plotting main results (assignment + extensions) ---")
-    ASSIGNMENT_FC = ["Sigmoid", "ReLU", "ReLU+Drop0.3"]
-    EXTENSION_FC = ["GELU", "Mish"]
-    EXTENSION_ALL = ASSIGNMENT_FC + EXTENSION_FC
+    print("\n--- Plotting main results ---")
+    ALL_FC = ["Sigmoid", "ReLU", "ReLU+Drop0.3", "GELU", "Mish"]
 
-    plot_training_curves(runs_by_model, ASSIGNMENT_FC,
-                         OUT_DIR / "training_curves_assignment.png",
-                         "Training and validation curves: assignment models "
+    plot_training_curves(runs_by_model, ALL_FC,
+                         OUT_DIR / "training_curves.png",
+                         "Training and validation curves "
                          f"({len(seeds)} seeds, +/- 1 std band)")
-    plot_training_curves(runs_by_model, EXTENSION_ALL,
-                         OUT_DIR / "training_curves_extensions.png",
-                         "Training and validation curves: assignment + extensions "
-                         f"({len(seeds)} seeds)")
-    print("wrote training_curves_assignment.png, training_curves_extensions.png")
+    print("wrote training_curves.png")
 
-    plot_grad_norms_per_layer(runs_by_model, ["Sigmoid", "ReLU"],
-                              OUT_DIR / "gradient_norms_assignment.png",
-                              "Per-Dense-kernel gradient RMS: sigmoid vs ReLU "
-                              "(seed 42, log y)")
-    plot_grad_norms_per_layer(runs_by_model, ["Sigmoid", "ReLU", "GELU", "Mish"],
-                              OUT_DIR / "gradient_norms_extensions.png",
-                              "Per-Dense-kernel gradient RMS: all FC activations "
-                              "(seed 42, log y)")
-    print("wrote gradient_norms_assignment.png, gradient_norms_extensions.png")
+    plot_grad_norms_overlay(runs_by_model, ["Sigmoid", "ReLU"],
+                            OUT_DIR / "gradient_norms_per_layer.png",
+                            "Per-Dense-kernel gradient norms: sigmoid vs ReLU "
+                            "(seed 42, log y)")
+    print("wrote gradient_norms_per_layer.png")
 
-    plot_confusion_matrices(runs_by_model, ["Sigmoid", "ReLU"],
-                            OUT_DIR / "confusion_assignment.png",
-                            "Per-class confusion matrices: sigmoid (left), "
-                            "ReLU (right). Seed 42, row-normalized.")
-    plot_confusion_matrices(runs_by_model,
-                            ["GELU", "Mish", "ReLU+Drop0.3"],
-                            OUT_DIR / "confusion_extensions.png",
-                            "Per-class confusion matrices: extensions. "
-                            "Seed 42, row-normalized.", cols=3)
-    print("wrote confusion_assignment.png, confusion_extensions.png")
+    write_per_class_csv(results, OUT_DIR / "per_class_accuracy.csv")
+    print("wrote per_class_accuracy.csv")
 
     print("\n--- PART 6: LR sweep (multi-seed, sigmoid + ReLU) ---")
     lr_df = run_lr_sweep(X_tr, y_tr_oh, X_te, y_te_oh)
-    plot_lr_sweep(lr_df, OUT_DIR / "lr_sweep_plot.png")
-    print("wrote lr_sweep_plot.png")
 
     print("\n--- PART 7: Classical baselines ---")
     classical_df = run_classical_baselines(X_tr, y_tr, X_te, y_te)
@@ -944,10 +999,7 @@ def main() -> None:
     grad_ratios = gradient_ratios_table(fc_results)
     headlines = headline_seed_variance(X_tr, y_tr_oh, X_te, y_te_oh)
 
-    print("\n--- Pareto + summary ---")
-    matrix_df = pd.read_csv(MATRIX_CSV) if MATRIX_CSV.exists() else None
-    plot_pareto(results, classical_df, matrix_df, OUT_DIR / "pareto_acc_vs_time.png")
-    print("wrote pareto_acc_vs_time.png")
+    print("\n--- Summary ---")
     write_summary(results, lr_df, classical_df, multiseed_df,
                   grad_ratios, headlines,
                   OUT_DIR / "results_summary.md")
