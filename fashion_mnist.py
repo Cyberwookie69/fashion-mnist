@@ -8,19 +8,18 @@ Maps to the assignment one-to-one:
     PART 3a - Replace sigmoid with ReLU
     PART 3b - Add Dropout(0.3)
 
-Plus four small extensions that earn marks:
+Plus extensions that earn marks:
     PART 4   - Modern activations: GELU and Mish
-    PART 5   - CNN reference baseline (Adam, see comment in run_cnn_experiment)
-    PART 6   - Learning-rate sensitivity sweep (5 LRs x 5 activations)
+    PART 6   - Learning-rate sensitivity sweep (5 LRs x sigmoid + ReLU)
     PART 7   - Classical sklearn baselines (LogReg + RandomForest)
     PART 8   - Multi-seed sanity check on top-5 cells from matrix_sweep.py
 
 Outputs (everything Word can paste):
     samples_preview.png             - Part 1
     training_curves_assignment.png  - sigmoid + ReLU + ReLU+Drop only (5 seeds)
-    training_curves_extensions.png  - assignment + GELU + Mish + CNN (5 seeds)
+    training_curves_extensions.png  - assignment + GELU + Mish (5 seeds)
     confusion_assignment.png        - sigmoid + ReLU only (seed 42)
-    confusion_extensions.png        - GELU + Mish + CNN + ReLU+Drop (seed 42)
+    confusion_extensions.png        - GELU + Mish + ReLU+Drop (seed 42)
     gradient_norms_assignment.png   - sigmoid vs ReLU, log y, seed 42
     gradient_norms_extensions.png   - all FC activations, log y, seed 42
     lr_sweep_plot.png               - LR sensitivity (Part 6)
@@ -43,10 +42,10 @@ Version history:
     0.2.0 (2026-04-27) - Added ReLU and Dropout(0.3) variants (Part 3a/3b)
                          and a per-class accuracy table. ReLU gained 25
                          percentage points without a single new parameter.
-    0.3.0 (2026-04-27) - Added GELU and Mish activations (Part 4) and the
-                         CNN reference (Part 5). GELU and Mish landed within
-                         seed noise of ReLU. Modern activations: marketing
-                         exists because the science is boring.
+    0.3.0 (2026-04-27) - Added GELU and Mish activations (Part 4). GELU and
+                         Mish landed within seed noise of ReLU. Modern
+                         activations: marketing exists because the science
+                         is boring.
     0.4.0 (2026-04-27) - Added LR sensitivity sweep (Part 6); five activations
                          across five learning rates. Discovered sigmoid is
                          not broken, just under-tuned. Mildly humbling.
@@ -90,9 +89,22 @@ Version history:
                          LogisticRegression max_iter from 300 to 1000 so
                          lbfgs converges cleanly. The convergence warning
                          turned out to be correct, which is rare.
+    1.6.0 (2026-05-04) - Forced multi-threaded TF intra-op (fixes Windows
+                         single-thread default). Diagnostic line at startup.
+    1.7.0 (2026-05-04) - Multi-seed FC + LR sweep (5 seeds), with +/- 1 std
+                         bands on training curves and error bars on the LR
+                         sweep. Plot functions take models_to_plot lists and
+                         emit both _assignment.png and _extensions.png pairs.
+                         Per-parameter RMS used for cross-layer-fair gradient
+                         comparison.
+    1.8.0 (2026-05-04) - Removed CNN entirely (build_cnn, run_cnn_experiment,
+                         all references in plots and summary). The CNN was
+                         comparing apples to oranges next to FC activation
+                         choices; activation studies belong in their own
+                         universe, architecture comparisons belong in another.
 """
 
-__version__ = "1.5.0"
+__version__ = "1.8.0"
 
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -180,7 +192,7 @@ def preview_samples(X: NDArray[np.float32], y: NDArray[np.int32],
 
 
 # -----------------------------------------------------------------------------
-# Model factories: FC (Parts 2-4) and CNN (Part 5)
+# Model factory: FC (Parts 2-4)
 # -----------------------------------------------------------------------------
 def build_fc(activation: str, dropout: float = 0.0) -> models.Sequential:
     """2-hidden-layer FC: Dense(256) -> Dense(128) -> Dense(10) softmax."""
@@ -196,23 +208,6 @@ def build_fc(activation: str, dropout: float = 0.0) -> models.Sequential:
     model.compile(optimizer=tf.keras.optimizers.SGD(),
                   loss="categorical_crossentropy", metrics=["accuracy"])
     return model
-
-
-def build_cnn() -> models.Sequential:
-    """Reference CNN: Conv32-Pool-Conv64-Pool-Dense128-Dense10. Adam optimizer,
-    not SGD, because the assignment says 10 epochs and SGD needs a few more
-    decades to train this. See run_cnn_experiment for the apologetic version
-    of the same point."""
-    return models.Sequential([
-        layers.Input(shape=(28, 28, 1)),
-        layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(64, (3, 3), activation="relu", padding="same"),
-        layers.MaxPooling2D((2, 2)),
-        layers.Flatten(),
-        layers.Dense(128, activation="relu"),
-        layers.Dense(NUM_CLASSES, activation="softmax"),
-    ])
 
 
 # -----------------------------------------------------------------------------
@@ -283,7 +278,7 @@ def run_fc_experiment(name: str, activation: str, dropout: float,
     y_pred = np.argmax(model.predict(X_te, batch_size=BATCH_SIZE, verbose=0), axis=1)
     y_true = np.argmax(y_te_oh, axis=1)
     return {
-        "name": name, "is_cnn": False, "seed": seed, "lr": lr,
+        "name": name, "seed": seed, "lr": lr,
         "history": history.history,
         "train_loss": history.history["loss"][-1],
         "train_acc": history.history["accuracy"][-1],
@@ -311,44 +306,6 @@ def run_fc_multi_seed(name: str, activation: str, dropout: float,
         print(f"  seed={s:3d}  train_acc={r['train_acc']:.4f}  "
               f"test_acc={r['test_acc']:.4f}  ({r['fit_time_s']:.1f}s)")
     return runs
-
-
-def run_cnn_experiment(X_tr: NDArray[np.float32], y_tr_oh: NDArray[np.float32],
-                       X_te: NDArray[np.float32], y_te_oh: NDArray[np.float32],
-                       ) -> dict[str, Any]:
-    """Train the reference CNN with Adam, not SGD. A 421K-param CNN trained
-    with vanilla SGD at lr=0.01 for 10 epochs reaches roughly 0.75 test
-    accuracy, which is *worse* than the ReLU FC net it is supposed to
-    anchor. With Adam on the same epoch and batch budget, the CNN cleanly
-    parks at ~0.91 and the comparison becomes interesting again. The
-    deviation is documented because some reviewer somewhere will ask, and
-    "Adam works on a CNN where SGD does not" is a less embarrassing answer
-    than "I ran the wrong baseline". Parts 2 to 4 stay on SGD per the
-    assignment spec; this is the one Part 5 indulgence."""
-    print("\n=== CNN reference (Adam, not SGD - see docstring) ===")
-    X_tr_img = X_tr.reshape(-1, 28, 28, 1)
-    X_te_img = X_te.reshape(-1, 28, 28, 1)
-    np.random.seed(SEED); tf.random.set_seed(SEED)
-    model = build_cnn()
-    model.compile(optimizer=tf.keras.optimizers.Adam(),
-                  loss="categorical_crossentropy", metrics=["accuracy"])
-    t0 = time.perf_counter()
-    history = model.fit(X_tr_img, y_tr_oh, validation_data=(X_te_img, y_te_oh),
-                        epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=2)
-    fit_time = time.perf_counter() - t0
-    y_pred = np.argmax(model.predict(X_te_img, batch_size=BATCH_SIZE, verbose=0), axis=1)
-    y_true = np.argmax(y_te_oh, axis=1)
-    print(f"[CNN] test_acc={history.history['val_accuracy'][-1]:.4f}")
-    return {
-        "name": "CNN (Adam)", "is_cnn": True,
-        "history": history.history,
-        "train_loss": history.history["loss"][-1],
-        "train_acc": history.history["accuracy"][-1],
-        "test_loss": history.history["val_loss"][-1],
-        "test_acc": history.history["val_accuracy"][-1],
-        "y_true": y_true, "y_pred": y_pred,
-        "fit_time_s": fit_time,
-    }
 
 
 # -----------------------------------------------------------------------------
@@ -875,9 +832,6 @@ def write_summary(results: list[dict[str, Any]], lr_df: pd.DataFrame,
              "essentially 0. The textbook 0.3 / 0.5 defaults are not universally optimal.\n")
     L.append("- **GELU and Mish are ~within seed noise of ReLU.** Modern smooth activations "
              "polish, they don't transform.\n")
-    L.append("- **CNN reference (Adam) clears 91%.** Architecture is a bigger lever than "
-             "activation choice once you're past sigmoid. Note: CNN uses Adam because "
-             "vanilla SGD lr=0.01 under-trains a 421K-param net in 10 epochs.\n")
     if len(classical_df) > 0:
         best_classical = float(classical_df["test_acc"].max())
         best_deep = max(r["test_acc"] for r in results)
@@ -935,18 +889,14 @@ def main() -> None:
             name, activation, dropout, X_tr, y_tr_oh, X_te, y_te_oh,
             seeds=seeds, lr=lr)
 
-    print("\n--- PART 5: CNN reference (Adam, single seed) ---")
-    cnn_run = run_cnn_experiment(X_tr, y_tr_oh, X_te, y_te_oh)
-    runs_by_model["CNN (Adam)"] = [cnn_run]
-
-    # Backwards-compat flat list using the seed=42 representative per model.
+    # Flat list using the seed=42 representative per model for downstream plots.
     results = [_representative_run(runs_by_model[name]) for name in runs_by_model]
-    fc_results = [r for r in results if not r.get("is_cnn")]
+    fc_results = results
 
     print("\n--- Plotting main results (assignment + extensions) ---")
     ASSIGNMENT_FC = ["Sigmoid", "ReLU", "ReLU+Drop0.3"]
     EXTENSION_FC = ["GELU", "Mish"]
-    EXTENSION_ALL = ASSIGNMENT_FC + EXTENSION_FC + ["CNN (Adam)"]
+    EXTENSION_ALL = ASSIGNMENT_FC + EXTENSION_FC
 
     plot_training_curves(runs_by_model, ASSIGNMENT_FC,
                          OUT_DIR / "training_curves_assignment.png",
@@ -955,7 +905,7 @@ def main() -> None:
     plot_training_curves(runs_by_model, EXTENSION_ALL,
                          OUT_DIR / "training_curves_extensions.png",
                          "Training and validation curves: assignment + extensions "
-                         f"({len(seeds)} seeds for FC, single seed for CNN)")
+                         f"({len(seeds)} seeds)")
     print("wrote training_curves_assignment.png, training_curves_extensions.png")
 
     plot_grad_norms_per_layer(runs_by_model, ["Sigmoid", "ReLU"],
@@ -973,10 +923,10 @@ def main() -> None:
                             "Per-class confusion matrices: sigmoid (left), "
                             "ReLU (right). Seed 42, row-normalized.")
     plot_confusion_matrices(runs_by_model,
-                            ["GELU", "Mish", "CNN (Adam)", "ReLU+Drop0.3"],
+                            ["GELU", "Mish", "ReLU+Drop0.3"],
                             OUT_DIR / "confusion_extensions.png",
                             "Per-class confusion matrices: extensions. "
-                            "Seed 42, row-normalized.", cols=2)
+                            "Seed 42, row-normalized.", cols=3)
     print("wrote confusion_assignment.png, confusion_extensions.png")
 
     print("\n--- PART 6: LR sweep (multi-seed, sigmoid + ReLU) ---")
