@@ -459,10 +459,11 @@ def plot_grad_norms_overlay(runs_by_model: dict[str, list[dict[str, Any]]],
         return
     fig, ax = plt.subplots(figsize=(9, 5.5))
     color_families = {
-        "Sigmoid": ["#fcae91", "#fb6a4a", "#a50f15"],
-        "ReLU":    ["#9ecae1", "#3182bd", "#08306b"],
-        "GELU":    ["#a1d99b", "#31a354", "#00441b"],
-        "Mish":    ["#bcbddc", "#756bb1", "#3f007d"],
+        "Sigmoid":      ["#fcae91", "#fb6a4a", "#a50f15"],
+        "ReLU":         ["#9ecae1", "#3182bd", "#08306b"],
+        "ReLU+Drop0.3": ["#fdbe85", "#fd8d3c", "#a63603"],
+        "GELU":         ["#a1d99b", "#31a354", "#00441b"],
+        "Mish":         ["#bcbddc", "#756bb1", "#3f007d"],
     }
     fallback = plt.get_cmap("tab10")
     for mi, (name, r) in enumerate(selected):
@@ -996,10 +997,11 @@ def main() -> None:
                          f"({len(seeds)} seeds, +/- 1 std band)")
     print("wrote training_curves.png")
 
-    plot_grad_norms_overlay(runs_by_model, ["Sigmoid", "ReLU"],
+    plot_grad_norms_overlay(runs_by_model,
+                            ["Sigmoid", "ReLU", "ReLU+Drop0.3"],
                             OUT_DIR / "gradient_norms_per_layer.png",
                             "Per-Dense-kernel gradient norms: sigmoid vs ReLU "
-                            "(seed 42, log y)")
+                            "vs ReLU+Drop0.3 (seed 42, log y)")
     print("wrote gradient_norms_per_layer.png")
 
     write_per_class_csv(results, OUT_DIR / "per_class_accuracy.csv")
